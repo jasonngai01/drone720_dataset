@@ -1,0 +1,7 @@
+All the tflite model are stored in here.
+
+uav20210913 >> it is the original testing model using transfer learning of yamnet to create.
+
+uav20211110 >> updated network model with 26 inch parabolic mic 1 st field test data.
+
+uav20211117 >> using google teachable machine to train

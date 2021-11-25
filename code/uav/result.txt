@@ -1,0 +1,5 @@
+Wed 17-11-2021  08:58:56
+No UAV detected
+tf.Tensor(-28.241777, shape=(), dtype=float32)
+Vehicle
+tf.Tensor(10.9375, shape=(), dtype=float32)
