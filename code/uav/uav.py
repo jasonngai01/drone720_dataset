@@ -1,22 +1,15 @@
-"""
-Connect a resistor and LED to board pin 8 and run this script.
-Whenever you say "stop", the LED should flash briefly
-"""
 print('load Tensorflow')
 import sounddevice as sd
 import numpy as np
 import scipy
 import scipy.signal
+from scipy import signal
 import timeit
-
+import datetime
 import soundfile as sf
 
-import datetime
-
-#import RPi.GPIO as GPIO
 import tensorflow as tf
 from tflite_runtime.interpreter import Interpreter
-
 import yamnet as yamnet_model
 
 # Parameters
@@ -29,32 +22,47 @@ sample_rate = 48000
 resample_rate = 16000
 num_channels = 1
 
-model_path = 'model/uav20210913.tflite'
-model_path_0 = 'model/yamnet.tflite'
-# Sliding window
+numtaps = 101 #Length of the filter (number of coefficients, i.e. the filter order + 1). numtaps must be odd if a passband includes the Nyquist frequency.
+cutoff = 400 #Cutoff frequency of filter (expressed in the same units as fs) OR an array of cutoff frequencies (that is, band edges). In the latter case, the frequencies in cutoff should be positive and monotonically increasing between 0 and fs/2. The values 0 and fs/2 must not be included in cutoff.
+
+#model_path
+model_path_u = 'model/uav20211125.tflite' #binary classification model
+
+model_path_um = 'model/uav20211125m.tflite' #multi classifcation model 
+
+model_path_y = 'model/yamnet.tflite' # yamnet model
+
+# create Sliding window to store the tmp data
 window = np.zeros(int(rec_duration * resample_rate) * 2) #32000 >> 2sec 
 
-
-# Load model (interpreter)
+# Load model with interpreter
 
 print('load UAVNET')
-interpreter = Interpreter(model_path)
+interpreter = Interpreter(model_path_u)
 input_details = interpreter.get_input_details()
 waveform_input_index = input_details[0]['index']
 output_details = interpreter.get_output_details()
-scores_output_index = output_details[0]['index']
+scores_output_index = output_details[1]['index']
+#0 is first serving layer, 1 is the embedding sequential layer, uav classification belong to embeding sequential layer
+
+print('load UAVNET_mutli')
+interpreter_um = Interpreter(model_path_um)
+input_details_um = interpreter_um.get_input_details()
+waveform_input_index_um = input_details_um[0]['index']
+output_details_um = interpreter.get_output_details()
+scores_output_index_um = output_details_um[1]['index']
 
 print('load YAMNET')
-interpreter0 = Interpreter(model_path_0)
-input_details0 = interpreter0.get_input_details()
-waveform_input_index0 = input_details0[0]['index']
-output_details0 = interpreter0.get_output_details()
-scores_output_index0 = output_details0[0]['index']
+interpreter_y = Interpreter(model_path_y)
+input_details_y = interpreter_y.get_input_details()
+waveform_input_index_y = input_details_y[0]['index']
+output_details_y = interpreter_y.get_output_details()
+scores_output_index_y = output_details_y[0]['index']
+#print (output_details_y)
 
 yamnet_classes = yamnet_model.class_names('model/yamnet_class_map.csv')
 
-
-print(input_details)
+########################################################################################################
 
 # Decimate (filter and downsample)
 def decimate(signal, old_fs, new_fs):
@@ -75,10 +83,8 @@ def decimate(signal, old_fs, new_fs):
 
     return resampled_signal, new_fs
 
-# This gets called every 0.5 seconds
+# This gets called every 1 seconds
 def sd_callback(rec, frames, time, status):
-
-    #GPIO.output(led_pin, GPIO.LOW)
 
     # Start timing for testing
     start = timeit.default_timer()
@@ -89,102 +95,258 @@ def sd_callback(rec, frames, time, status):
     
     # Remove 2nd dimension from recording sample
     rec = np.squeeze(rec)
-    
     # Resample
     rec, new_fs = decimate(rec, sample_rate, resample_rate)
     
     # Save recording onto sliding window
     window[:len(window)//2] = window[len(window)//2:]
     window[len(window)//2:] = rec
+    sf.write('rec_orginal.wav' ,rec, resample_rate)
+    
+    filter_rec = signal.firwin(numtaps=numtaps, cutoff=cutoff , fs=resample_rate, pass_zero=False)
+
+    rec = signal.lfilter(filter_rec, [1.0], rec)
+    
+    rec = tf.cast(rec, dtype = tf.float32)
     
     #save the rec
-    #librosa.output.write_wav('audio/rec.wav',rec,resample_rate)
     sf.write('rec.wav' ,rec, resample_rate)
-
-
+    rec_1 = tf.expand_dims(rec , 0) # change the waveform.shape from (15600,) to (1,15600) to fit the model maker #rec is to fit the yamnet model and the rec1 is to fit the model maker uav model
+    
+    
+    
+    #############################################################################################################################
+    
     # Make prediction from model
-    interpreter.resize_tensor_input(waveform_input_index, [rec.size], strict=True)
+    
     interpreter.allocate_tensors()
-    interpreter.set_tensor(waveform_input_index, rec)
+    interpreter.set_tensor(waveform_input_index, rec_1)
     
     interpreter.invoke()
     
+    output_data = interpreter.get_tensor(output_details[1]['index'])
+    #print(output_data) will should softmax [x, 1-x] which is the percentage of uav
     scores = interpreter.get_tensor(scores_output_index)
     uav_prediction = scores.argmax()
-    class_scores = tf.reduce_mean(scores, axis=0) * 100
-    #top_score = class_scores[uav_prediction] * 100 #percentage of class
+    class_scores = tf.reduce_mean(scores, axis=0) 
+    top_score = scores[0][uav_prediction] * 100 #percentage of class
     
+    
+    #############################################################################################################################
+    
+    # Make prediction from model
+    
+    interpreter_um.allocate_tensors()
+    interpreter_um.set_tensor(waveform_input_index, rec_1)
+    
+    interpreter_um.invoke()
+    
+    output_data_um = interpreter_um.get_tensor(output_details_um[1]['index'])
+    #print(output_data) will should softmax [x, 1-x] which is the percentage of uav
+    scores_um = interpreter_um.get_tensor(scores_output_index_um)
+    uav_prediction_um = scores_um.argmax()
+    class_scores_um = tf.reduce_mean(scores, axis=0) 
+    top_score_um = scores_um[0][uav_prediction_um] * 100 #percentage of class
+    
+    ###############################################################################################################################
     
     # model prediction using yamnet tflite
-    interpreter0.resize_tensor_input(waveform_input_index, [len(rec)], strict=True)
-    interpreter0.allocate_tensors()
-    interpreter0.set_tensor(waveform_input_index0, rec)
+    interpreter_y.resize_tensor_input(waveform_input_index, [len(rec)], strict=True)
+    interpreter_y.allocate_tensors()
+    interpreter_y.set_tensor(waveform_input_index_y, rec)
     
-    interpreter0.invoke()
+    interpreter_y.invoke()
     
-    scores_0 = (interpreter0.get_tensor(scores_output_index0))
-    class_scores_0 = tf.reduce_mean(scores_0, axis=0)
-    prediction_0 = scores_0.mean(axis=0).argmax()
-    inferred_class = yamnet_classes[prediction_0] # class map with csv
-    top_score_0 = class_scores_0[prediction_0] * 100 #percentage of class
+    scores_y = (interpreter_y.get_tensor(scores_output_index_y))
+    class_scores_y = tf.reduce_mean(scores_y, axis=0)
+    prediction_y = scores_y.mean(axis=0).argmax()
+    inferred_class = yamnet_classes[prediction_y] # class map with csv
+    top_score_y = class_scores_y[prediction_y] * 100 #percentage of class
+    top_score_y = float(top_score_y)
+    prediction = np.mean(scores_y, axis=0)
     
-    #prediction = np.mean(scores, axis=0)
     # Report the highest-scoring classes and their scores.
-    #top3_i = np.argsort(prediction)[::-1][:3]
+    top3_i = np.argsort(prediction)[::-1][:3]
+    inferred_class_1 = yamnet_classes[top3_i] 
     
-        
+    list1 = top3_i # yamnet model top 3 result
+    #list2 = [329, 121, 131, 406, 32, 278, 330, 331, 332, 333, 334, 338, 340, 341, 398, 490, 514, 515]
+    list2 = [329, 121, 131, 406, 32, 278, 330, 331, 332, 333, 334, 338, 340, 341, 398, 490, 298] #no white and pink noise
+ 
+    a = [x for x in list1 if x in list2]
+    
+    ###############################################################################################################################
+    
+    # the format of result reporting
+    # since the binary model is sensitive, uav detected in binary model show yellow colour.
+    # multi model is relatively stable. uav output  1 2 3 will be shown in red colour.
+    #yamnet model result such as aircraft 329, insert 121, whale 131, mechanical fan 406, Humming 32, Rustling leaves 278,Aircraft engine 330,
+    #Jet engine 331, Propeller, airscrew 332, Helicopter 333, Fixed-wing aircraft 334, 
+    #Light engine (high frequency) 338, Lawn mower340, Chainsaw 341, Mechanisms 398, Hum 490, White noise 514, pink noise 515
+    
+    
     now = datetime.datetime.now()
     
-    
     with open('result.txt','w')as f:
-        
+        print('----------------------------------------------------------- ')
         print(now.strftime("%a %d-%m-%Y  %H:%M:%S"))
         f.write(now.strftime("%a %d-%m-%Y  %H:%M:%S"))
         f.write('\n')
         f.close()
-    
-    if uav_prediction == 1:
-        print('UAV detected')
+        
+    print('')
+    print('Bin UAV Classification:')
+    if uav_prediction == 1 and top_score > 75 and uav_prediction_um != 0 : # show 0 or 1 , uav detected or not
+        print('    {:.3f} %      UAV detected'.format(top_score)) #top_score is the precentage of class detected
+        
         with open('result.txt','a')as f:
-            f.write('UAV detected')
+            f.write('{:.3f} %      UAV detected in Bin-Classication Model'.format(top_score))
             f.write('\n')
             f.close()
             
-        with open('uav_result.txt','w')as f_uav:
-            f_uav.write('1')
-            f_uav.write('\n')
-            f_uav.close()
+        with open('result_ora.txt','w')as f_ora:
+            f_ora.write('1')
+            f_ora.write('\n')
+            f_ora.close()
                 
     else:         
-        print('NO UAV detected ')
+        print('    {:.3f} %      NO UAV detected '.format(top_score))
+        
         with open('result.txt','a')as f:
-            f.write('No UAV detected')
+            f.write('{:.3f} %      NO UAV detected in Bin-Classication Model'.format(top_score))
             f.write('\n')
             f.close()
             
-        with open('uav_result.txt','w')as f_uav:
-            f_uav.write('0')
-            f_uav.write('\n')
-            f_uav.close()
-            
-    print(class_scores)
-    print(inferred_class)    
-    print(top_score_0)
-    with open('result.txt','a')as f:
-        f.write(str(class_scores))
-        f.write('\n')
-        f.write(str(inferred_class))
-        f.write('\n')
-        f.write(str(top_score_0))
-        f.write('\n')
-        f.close()
-    
-    #print(file_name, ':\n' + '\n'.join('  {:12s}: {:.3f}'.format(yamnet_classes[i], prediction[i])for i in top3_i))
+        with open('result_ora.txt','w')as f_ora:
+            f_ora.write('0')
+            f_ora.write('\n')
+            f_ora.close()
+        
+    #print('{:.3f} % {:12s} detected'.format(top_score_y,inferred_class)) # show the precentage of yamnet class
     
     print('')
+    print('Multi UAV Classification:')
+    if uav_prediction_um == 0: # show 0 or 1 , uav detected or not
+        print('    {:.3f} %       NO UAV detected'.format(top_score_um))
+        
+        with open('result.txt','a')as f:
+            f.write('{:.3f} %       NO UAV detected in Mul-Classication Model'.format(top_score_um))
+            f.write('\n')
+            f.close()
+            
+        with open('result_red.txt','w')as f_red:
+            f_red.write('0')
+            f_red.write('\n')
+            f_red.close()
+        
+    elif uav_prediction_um == 1 and uav_prediction == 1 and top_score > 70 and len(a) > 0: # show 0 or 1 , uav detected or not
+        print('    {:.3f} %       UAV from far detected'.format(top_score_um))
+        
+        with open('result.txt','a')as f:
+            f.write('{:.3f} %       UAV from far detected'.format(top_score_um))
+            f.write('\n')
+            f.close()
+        
+        with open('result_red.txt','w')as f_red:
+            f_red.write('1')
+            f_red.write('\n')
+            f_red.close()
+        
+    elif uav_prediction_um == 2 and top_score_um > 65: # show 0 or 1 , uav detected or not
+        print('{:.3f} %       Hovering UAV detected'.format(top_score_um))
+        
+        with open('result.txt','a')as f:
+            f.write('{:.3f} %       Hovering UAV detected'.format(top_score_um))
+            f.write('\n')
+            f.close()
+            
+        with open('result_red.txt','w')as f_red:
+            f_red.write('1')
+            f_red.write('\n')
+            f_red.close()
+    
+    elif uav_prediction_um == 3 and top_score_um > 65: # show 0 or 1 , uav detected or not
+        print('{:.3f} %       Moving UAV detected'.format(top_score_um))
+        
+        with open('result.txt','a')as f:
+            f.write('{:.3f} %       Hovering UAV detected'.format(top_score_um))
+            f.write('\n')
+            f.close()
+        
+        with open('result_red.txt','w')as f_red:
+            f_red.write('1')
+            f_red.write('\n')
+            f_red.close()
+            
+    else :
+        print('    {:.3f} %       NO UAV detected'.format(top_score_um))
+        with open('result.txt','a')as f:
+            f.write('{:.3f} %       NO UAV detected'.format(top_score_um))
+            f.write('\n')
+            f.close()
+            
+        with open('result_red.txt','w')as f_red:
+            f_red.write('0')
+            f_red.write('\n')
+            f_red.close()
+    
+     
+    
+    print('')
+    print('Yamnet Classification:')
+    #print(uav_prediction_um)
+    #print('{:.3f}% '.format(top_score_um))
+    
+    n = 0 
+    for i in top3_i:
+        print('    {:.3f} %      {:12s} detected'.format(prediction[i]*100,inferred_class_1[n]))
+        with open('result.txt','a')as f:
+            f.write('{:.3f} %      {:12s} detected'.format(prediction[i]*100,inferred_class_1[n]))
+            f.write('\n')
+            f.close()
+        n = n + 1
     
     
 
+    
+    # yamnet model result comparison
+    #yamnet model result such as aircraft 329, insert 121, whale 131, mechanical fan 406, Humming 32, Rustling leaves 278,Aircraft engine 330,
+    #Jet engine 331, Propeller, airscrew 332, Helicopter 333, Fixed-wing aircraft 334, 
+    #Light engine (high frequency) 338, Lawn mower340, Chainsaw 341, Mechanisms 398, Hum 490, White noise 514, pink noise 515, motorboat 298
+    
+    if top_score_y > 15 :
+        
+        #print(top3_i)
+        #print(top_score_y)
+    
+        
+        #print(a)
+        #print(len(a))
+    
+        if len(a) > 0 :
+            with open('result_yel.txt','w')as f_yel:
+                f_yel.write('1')
+                f_yel.write('\n')
+                f_yel.close()
+    
+        else :
+            with open('result_yel.txt','w')as f_yel:
+                f_yel.write('0')
+                f_yel.write('\n')
+                f_yel.close()
+                
+    else :
+        with open('result_yel.txt','w')as f_yel:
+                f_yel.write('0')
+                f_yel.write('\n')
+                f_yel.close()
+        
+    
+    #if top3_i
+    print('----------------------------------------------------------- ')
+    print('')
+    
+    
 
 # Start streaming from microphone
 with sd.InputStream(channels=num_channels,

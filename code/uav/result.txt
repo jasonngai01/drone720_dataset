@@ -1,5 +1,6 @@
-Wed 17-11-2021  08:58:56
-No UAV detected
-tf.Tensor(-28.241777, shape=(), dtype=float32)
-Vehicle
-tf.Tensor(10.9375, shape=(), dtype=float32)
+Wed 01-12-2021  20:41:29
+    Original        Audio: 100.000 %      0 UAV detected    400Hz Filtered  Audio: 100.000 %      0 UAV detected    1000Hz Filtered Audio: 100.000 %      0 UAV detected
+    Original        Audio: 100.000 %      0 UAV detected    400Hz Filtered  Audio: 100.000 %      0 UAV detected    1000Hz Filtered Audio: 100.000 %      0 UAV detected
+66.797 %      Silence      detected
+1.562 %      Speech       detected
+1.562 %      Sound effect detected
